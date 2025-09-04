@@ -15,7 +15,7 @@ from .params import default_params, battaglia_defaults
 from .fft import generic_profile_fft
 import scipy
 
-from scipy.integrate import simps
+from scipy.integrate import simpson as simps
 from scipy.integrate import quad
 import time
 from matplotlib import pyplot as plt
