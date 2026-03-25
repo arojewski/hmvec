@@ -61,7 +61,7 @@ def f_nu(nu,zs,delta=200.,norm_consistency=True,
     unnormalized = (1. + (beta*nu)**(-2.*phi))*(nu**(2*eta))*np.exp(-gamma*nu**2./2.)
     if norm_consistency:
         #file_path = path.join(path.dirname(__file__), '../data/alpha_consistency.txt')
-        file_path = '/home/user/ps_covar/envcovar2/lib/python3.10/site-packages/hmvec/data/alpha_consistency.txt'
+        file_path = '/home/arojewsk/cb_env/lib/python3.10/site-packages/hmvec/data/alpha_consistency.txt'
         izs,ialphas = np.loadtxt(file_path,unpack=True) # FIXME: hardcoded
         alpha = interp1d(izs,ialphas,bounds_error=True)(zs)
     return alpha * unnormalized 
