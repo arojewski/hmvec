@@ -341,6 +341,79 @@ class HaloModel(Cosmology):
         ks,pkouts = generic_profile_fft(presFunc,cgs,rgs[...,None],self.zs,self.ks,xmax,nxs,do_mass_norm=False)
         self.pk_profiles[name] = pkouts.copy()*4*np.pi*(sigmaT/(mElect*constants.c**2))*(r200critz**3*((1+self.zs)**2/self.h_of_z(self.zs))[...,None])[...,None]
 
+    ### CEV: add profile fittted to BOSS CMASS galaxies
+
+    def add_amodeo20_gnfw_pres_profile(self, name,
+                                    P0=2.0, alpha_t=0.8, beta_t=2.6,
+                                    gamma_t=-0.3,
+                                    nxs=None, xmax=None, ignore_existing=False):
+        """
+        Implements the GNFW THERMAL pressure profile fit in 2009.05558v4 (Table II),
+        with fixed gamma_t and x_{c,t}(M,z) as in the text, ignoring the 2-halo term.
+
+        Stores the resulting Fourier-space tSZ kernel in self.pk_profiles[name],
+        using the same conventions as add_battaglia_pres_profile.
+
+        Parameters default to the Table II best-fit central values:
+        P0=2.0, alpha_t=0.8, beta_t=2.6
+        and fixed small-radius parameter:
+        gamma_t=-0.3
+        """
+        if not(ignore_existing):
+            assert name not in self.pk_profiles.keys()
+        assert name != 'nfw'
+
+        # --- convert internal halo masses to M200c (same machinery as Battaglia) ---
+        rhocritz = self.rho_critical_z(self.zs)
+        if self.mdef == 'vir':
+            delta_rhos1 = rhocritz * self.deltav(self.zs)
+        elif self.mdef == 'mean':
+            delta_rhos1 = self.rho_matter_z(self.zs) * 200.0
+        else:
+            raise ValueError(f"Unknown mdef '{self.mdef}'")
+
+        rvirs = self.rvir(self.ms[None, :], self.zs[:, None])
+        cs = self.concentration()
+        delta_rhos2 = 200.0 * self.rho_critical_z(self.zs)  # 200c target
+        m200critz = mdelta_from_mdelta(self.ms, cs, delta_rhos1, delta_rhos2)
+        r200critz = R_from_M(m200critz, self.rho_critical_z(self.zs)[:, None], delta=200.0)
+
+        # Generate profiles
+        # --- build P_e(x) with x = r/R200c ---
+        omb = self.p['ombh2'] / self.h**2.
+        omm = self.om0
+
+        presFunc = lambda x: P_e_amodeo20_x(
+            x,
+            m200critz[..., None],           # (nz, nm, 1)
+            r200critz[..., None],           # (nz, nm, 1)
+            self.zs[:, None, None],         # (nz, 1, 1)
+            omb, omm,
+            rhocritz[..., None, None],      # (nz, 1, 1)
+            P0=P0, alpha_t=alpha_t, beta_t=beta_t, gamma_t=gamma_t
+        )
+
+        # truncation at rvir, expressed in x = r/R200c
+        rgs = r200critz                 # scale radius is R200c
+        cgs = rvirs / rgs               # x_max = rvir/R200c
+        sigmaT = constants.physical_constants['Thomson cross section'][0]
+        mElect = constants.physical_constants['electron mass'][0] / default_params['mSun']
+
+        ks, pkouts = generic_profile_fft(
+            presFunc, cgs, rgs[..., None], self.zs, self.ks,
+            xmax, nxs, do_mass_norm=False
+        )
+
+        self.pk_profiles[name] = pkouts.copy() * 4.0 * np.pi * (sigmaT / (mElect * constants.c**2)) \
+            * (r200critz**3 * (((1.0 + self.zs)**2 / self.h_of_z(self.zs))[..., None]))[..., None]
+        
+        xs = np.linspace(0.,xmax,nxs+1)[1:]
+        rhos = presFunc(xs)
+        rhos_cut = rhos + cgs[...,None]*0.
+        self.amadeo_rhos = rhos.copy()
+        self.amodeo_rhos_cut = rhos_cut.copy()
+        self.amadeo_xs = xs.copy()
+ 
     def add_nfw_profile(self,name,numeric=False,
                         nxs=None,
                         xmax=None,ignore_existing=False):
@@ -1250,7 +1323,46 @@ def P_e_generic_x(x,m200critz,R200critz,z,omb,omm,rhocritz,
     G_newt = constants.G/(default_params['parsec']*1e6)**3*default_params['mSun']
     return eFrac*(omb/omm)*200*m200critz*G_newt* rhocritz/(2*R200critz) * P0 * (x/xc)**gamma * (1.+(x/xc)**alpha)**(-beta)
 
+### CEV: add new profile
 
+def xc_t_amodeo20(m200critz, z):
+    """
+    Core scale for GNFW thermal pressure profile, (from text around GNFW pressure fit):
+      x_{c,t} = 0.497 * (M200/1e14 Msun)^(-0.00865) * (1+z)^(0.731)
+    m200critz must be M200c in Msun (same convention as rest of file).
+    """
+    return 0.497 * (m200critz / 1e14)**(-0.00865) * (1.0 + z)**(0.731)
+
+
+def P_e_amodeo20_x(x, m200critz, R200critz, z, omb, omm, rhocritz,
+                   P0=2.0, alpha_t=0.8, beta_t=2.6,
+                   gamma_t=-0.3, XH=0.76):
+    """
+    Electron pressure profile corresponding to the GNFW thermal pressure model in 2009.05558v4,
+    using Table II best-fit (P0, alpha_t, beta_t) and fixed (gamma_t, x_{c,t}(M,z)).
+
+    Inputs:
+      x = r/R200c (dimensionless)
+      m200critz = M200c(z) in Msun
+      R200critz = R200c(z) in (physical) Mpc, consistent with R_from_M in this file
+      rhocritz = rho_crit(z) in Msun / Mpc^3, consistent with rho_critical_z()
+
+    Returns:
+      P_e(x) in the same internal pressure units as P_e_generic_x uses.
+    """
+    # electron fraction conversion: P_e = eFrac * P_th
+    eFrac = 2.0 * (XH + 1.0) / (5.0 * XH + 3.0)
+
+    # self-similar pressure scale P200 = G M200 200 rho_c fb / (2 R200)
+    G_newt = constants.G / (default_params['parsec'] * 1e6)**3 * default_params['mSun']  # same as P_e_generic_x
+    fb = omb / omm
+    P200 = G_newt * m200critz * 200.0 * rhocritz * fb / (2.0 * R200critz)
+
+    # GNFW shape with fixed core scaling x_c,t(M,z)
+    xc = xc_t_amodeo20(m200critz, z)
+    shape = P0 * (x / xc)**(gamma_t) * (1.0 + (x / xc)**(alpha_t))**(-beta_t)
+
+    return eFrac * P200 * shape
 
 
 
